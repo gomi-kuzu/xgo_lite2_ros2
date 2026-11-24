@@ -1,4 +1,4 @@
-# Set gait type. Allowed: "trot", "walk", "high_walk".
+# Set gait type. Allowed: "trot", "walk", "high_walk", "slow_trot".
 string gait_type
 ---
 bool success

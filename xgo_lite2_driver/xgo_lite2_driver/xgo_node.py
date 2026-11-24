@@ -26,13 +26,13 @@ Design highlights
     - /play_action          (xgo_lite2_msgs/PlayPreset)    -> action(id)
 * Observations
     - /joint_states     (sensor_msgs/JointState, rad)      <- read_motor()
-    - /imu/data         (sensor_msgs/Imu)                  <- read_roll/pitch/yaw()
+    - /imu/data         (sensor_msgs/Imu)                  <- read_imu() + read_roll/pitch/yaw()
     - /battery_state    (sensor_msgs/BatteryState)         <- read_battery()
     - /odom             (nav_msgs/Odometry, open-loop)     <- integrated /cmd_vel
 
-At startup the node calls ``read_firmware()`` and, when ``version=='auto'``,
-selects the xgolib parameter table for XGO-Mini (firmware string starting
-with ``M``) or XGO-Lite otherwise.
+xgolib_dog (v1.4+) reads the firmware and selects the parameter table inside
+its constructor; the node then forces the ``xgolite`` table (XGO-Lite2 only).
+Note: the constructor also issues ``reset()``.
 
 Because the underlying serial protocol is single-threaded and its reads block
 for up to ~1 s, all API access is serialised behind a single ``threading.Lock``
@@ -64,7 +64,8 @@ from xgo_lite2_msgs.action import PlayPreset
 from xgo_lite2_msgs.msg import BodyPosture, LegPosition
 from xgo_lite2_msgs.srv import SetGaitType, SetMotorLoad, SetPace
 
-from .xgolib import XGO
+from . import xgolib_dog
+from .xgolib_dog import XGO_DOG
 
 
 DEG2RAD = math.pi / 180.0
@@ -121,8 +122,6 @@ class XgoDriverNode(Node):
         # ---------------- parameters ----------------
         self.declare_parameter('serial_port', '/dev/ttyAMA0')
         self.declare_parameter('baudrate', 115200)
-        # 'auto' -> query firmware and pick xgolite / xgomini automatically.
-        self.declare_parameter('version', 'auto')
 
         # cmd_vel scaling. Input is assumed [m/s] / [rad/s], output is xgolib step
         # units. xgolib turn() step is in deg/s (limit 100), so gain 57.3 maps
@@ -157,19 +156,17 @@ class XgoDriverNode(Node):
         # ---------------- hardware ----------------
         self._hw_lock = threading.Lock()
         try:
-            # Open with a safe default first; version may be re-applied below
-            # after firmware auto-detection.
-            init_version = ('xgolite' if self._version == 'auto'
-                            else self._version)
-            self.dog = XGO(self._serial_port, baud=self._baudrate,
-                           version=init_version)
+            self.dog = XGO_DOG(self._serial_port, baud=self._baudrate)
         except Exception as exc:  # pragma: no cover - depends on hardware
             self.get_logger().error(
                 f'Failed to open XGO serial port {self._serial_port}: {exc}')
             raise
 
-        # Detect firmware / model per official doc guidance.
-        self._detect_and_apply_version()
+        self.get_logger().info(
+            f'XGO firmware string: "{getattr(self.dog, "version", "")}"')
+        # This package supports XGO-Lite2 only: force the xgolite table
+        # regardless of what the firmware auto-detection chose.
+        xgolib_dog.changePara('xgolite')
 
         # ---------------- executor / cbgs ----------------
         # Reentrant so the executor can service reads and writes concurrently;
@@ -278,15 +275,13 @@ class XgoDriverNode(Node):
         self._maybe_create_timer(10.0, self._watchdog_cmd_vel)
 
         self.get_logger().info(
-            f'XGO driver ready on {self._serial_port} '
-            f'(version={self._version}).')
+            f'XGO driver ready on {self._serial_port}.')
 
     # ---------------------------------------------------------------- helpers
     def _load_parameters(self) -> None:
         gp = self.get_parameter
         self._serial_port = gp('serial_port').value
         self._baudrate = int(gp('baudrate').value)
-        self._version = gp('version').value
 
         self._linear_gain_x = float(gp('linear_gain_x').value)
         self._linear_gain_y = float(gp('linear_gain_y').value)
@@ -320,29 +315,6 @@ class XgoDriverNode(Node):
         if hz <= 0.0:
             return
         self.create_timer(1.0 / hz, cb, callback_group=self._cb_read)
-
-    def _detect_and_apply_version(self) -> None:
-        """Query firmware and re-apply the correct xgolib parameter table."""
-        fw = ''
-        try:
-            with self._hw_lock:
-                fw = self.dog.read_firmware() or ''
-        except Exception as exc:  # pragma: no cover - hardware
-            self.get_logger().warn(f'read_firmware failed: {exc}')
-            return
-        self.get_logger().info(f'XGO firmware string: "{fw}"')
-        if self._version != 'auto':
-            return
-        # Per official doc: firmware starting with 'M' -> XGO-MINI, else LITE.
-        detected = 'xgomini' if fw.startswith('M') else 'xgolite'
-        self.get_logger().info(f'Auto-detected model: {detected}')
-        try:
-            # Re-init to apply detected parameter table without reopening serial.
-            from .xgolib import changePara
-            changePara(detected)
-            self._version = detected
-        except Exception as exc:  # pragma: no cover - hardware
-            self.get_logger().warn(f'Failed to apply detected version: {exc}')
 
     # ---------------------------------------------------------- cmd handlers
     def _on_cmd_vel(self, msg: Twist) -> None:
@@ -411,7 +383,7 @@ class XgoDriverNode(Node):
             self.dog.claw(int(msg.data))
 
     def _on_mark_time(self, msg: UInt8) -> None:
-        # 0 = stop, 10..35 mm = leg-raise height for marching in place.
+        # 0 = stop, 10..25 mm = leg-raise height.
         with self._hw_lock:
             self.dog.mark_time(int(msg.data))
 
@@ -496,7 +468,7 @@ class XgoDriverNode(Node):
 
     def _srv_set_gait(self, req: SetGaitType.Request,
                       resp: SetGaitType.Response) -> SetGaitType.Response:
-        if req.gait_type not in ('trot', 'walk', 'high_walk'):
+        if req.gait_type not in ('trot', 'walk', 'high_walk', 'slow_trot'):
             resp.success = False
             resp.message = f'Unknown gait: {req.gait_type}'
             return resp
@@ -542,8 +514,13 @@ class XgoDriverNode(Node):
             self.get_logger().warn(
                 f'action_id {action_id} is outside documented range [1,20].')
 
-        duration = float(req.duration) if req.duration > 0.0 \
-            else self._default_preset_duration
+        if req.duration > 0.0:
+            duration = float(req.duration)
+        else:
+            # xgolib_dog ships per-action durations; fall back to the param.
+            table = xgolib_dog.XGOparam.get('ActionTime', {})
+            duration = float(table.get(action_id,
+                                       self._default_preset_duration))
 
         with self._hw_lock:
             self.dog.action(action_id)
@@ -596,6 +573,7 @@ class XgoDriverNode(Node):
                 roll = self.dog.read_roll()
                 pitch = self.dog.read_pitch()
                 yaw = self.dog.read_yaw()
+                raw = self.dog.read_imu()
         except Exception as exc:  # pragma: no cover - hardware
             self.get_logger().warn(f'read imu failed: {exc}')
             return
@@ -607,15 +585,28 @@ class XgoDriverNode(Node):
             float(pitch) * DEG2RAD,
             float(yaw) * DEG2RAD,
         )
-        # Coarse orientation covariance; angular vel & linear accel unavailable
-        # from xgolib, mark them invalid via -1 on the first diagonal entry.
+        # read_imu(): [ax, ay, az] m/s^2, [gx, gy, gz] deg/s, then rpy.
+        has_raw = isinstance(raw, (list, tuple)) and len(raw) >= 6
+        if has_raw:
+            msg.linear_acceleration.x = float(raw[0])
+            msg.linear_acceleration.y = float(raw[1])
+            msg.linear_acceleration.z = float(raw[2])
+            msg.angular_velocity.x = float(raw[3]) * DEG2RAD
+            msg.angular_velocity.y = float(raw[4]) * DEG2RAD
+            msg.angular_velocity.z = float(raw[5]) * DEG2RAD
         msg.orientation_covariance = [
             0.01, 0.0, 0.0,
             0.0, 0.01, 0.0,
             0.0, 0.0, 0.01,
         ]
-        msg.angular_velocity_covariance = [-1.0] + [0.0] * 8
-        msg.linear_acceleration_covariance = [-1.0] + [0.0] * 8
+        if has_raw:
+            msg.angular_velocity_covariance = [
+                0.01, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0, 0.01]
+            msg.linear_acceleration_covariance = [
+                0.1, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0, 0.1]
+        else:
+            msg.angular_velocity_covariance = [-1.0] + [0.0] * 8
+            msg.linear_acceleration_covariance = [-1.0] + [0.0] * 8
         self.pub_imu.publish(msg)
 
     def _pub_battery(self) -> None:
