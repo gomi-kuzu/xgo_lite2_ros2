@@ -1,0 +1,9 @@
+# Load or unload servo motors.
+# leg_id: 0 = all legs, 1..4 = specific leg, 5 = arm (per xgolib).
+# load:   true  -> load_motor(leg_id) / load_allmotor()
+#         false -> unload_motor(leg_id) / unload_allmotor()
+uint8 leg_id
+bool load
+---
+bool success
+string message

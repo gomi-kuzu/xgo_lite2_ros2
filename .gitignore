@@ -1,0 +1,18 @@
+# Build / install artifacts (should live in a colcon workspace, not the repo)
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~

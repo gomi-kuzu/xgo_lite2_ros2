@@ -1,0 +1,5 @@
+# Set step pace. Allowed: "normal", "slow", "high".
+string pace
+---
+bool success
+string message

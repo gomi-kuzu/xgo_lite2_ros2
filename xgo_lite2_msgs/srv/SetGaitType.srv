@@ -1,0 +1,5 @@
+# Set gait type. Allowed: "trot", "walk", "high_walk".
+string gait_type
+---
+bool success
+string message

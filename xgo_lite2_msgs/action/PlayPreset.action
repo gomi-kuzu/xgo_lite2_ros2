@@ -1,0 +1,12 @@
+# Goal: preset action id (1..20 as documented in xgo_api_manual.md).
+int32 action_id
+# Optional: user-specified expected playback duration [sec]. 0 => use node default.
+float32 duration
+---
+# Result
+bool success
+string message
+---
+# Feedback
+string status
+float32 progress
