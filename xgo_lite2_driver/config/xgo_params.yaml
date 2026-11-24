@@ -2,9 +2,6 @@ xgo_lite2_driver:
   ros__parameters:
     serial_port: /dev/ttyAMA0
     baudrate: 115200
-    # 'auto' -> query read_firmware() at startup: 'M...' => xgomini, else xgolite.
-    # Set explicitly to 'xgolite' or 'xgomini' to skip auto-detection.
-    version: auto
 
     # cmd_vel scaling: input assumed [m/s] / [rad/s], scaled to xgolib step units.
     # xgolib turn() step is in deg/s -> 1 rad/s ~= 57.3 deg/s.
